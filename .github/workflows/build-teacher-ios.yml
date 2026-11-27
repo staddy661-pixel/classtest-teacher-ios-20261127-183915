@@ -1,0 +1,194 @@
+name: Build ClassTest Teacher iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    name: Teacher iOS IPA
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Build cloudflared static library for iOS (arm64)
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/cloudflare/cloudflared.git /tmp/cloudflared
+          cd /tmp/cloudflared
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("cmd/cloudflared/main.go")
+          src = p.read_text(encoding="utf-8")
+          src = src.replace("func main() {", "func cloudflaredMain() {", 1)
+          src = src.replace("graceShutdownC := make(chan struct{})", "graceShutdownC := bridgeResetShutdown()", 1)
+          p.write_text(src, encoding="utf-8")
+          PY
+
+          cat <<'EOF' > cmd/cloudflared/bridge.go
+          package main
+
+          /*
+          #include <stdlib.h>
+          #include <string.h>
+          */
+          import "C"
+
+          import (
+          	"bufio"
+          	"fmt"
+          	"os"
+          	"regexp"
+          	"sync"
+          	"unsafe"
+          )
+
+          var (
+          	bridgeMu       sync.Mutex
+          	bridgeStatus   = "off"
+          	bridgeURL      = ""
+          	bridgeShutdown chan struct{}
+          	bridgeOnce     sync.Once
+          	tunnelURLRe    = regexp.MustCompile(`https://[a-z0-9-]+\.trycloudflare\.com`)
+          )
+
+          func bridgeResetShutdown() chan struct{} {
+          	bridgeMu.Lock()
+          	defer bridgeMu.Unlock()
+          	bridgeShutdown = make(chan struct{})
+          	bridgeOnce = sync.Once{}
+          	return bridgeShutdown
+          }
+
+          //export StartCloudflaredTunnel
+          func StartCloudflaredTunnel(port C.int) {
+          	bridgeMu.Lock()
+          	bridgeStatus = "starting"
+          	bridgeURL = ""
+          	bridgeMu.Unlock()
+
+          	r, w, err := os.Pipe()
+          	if err == nil {
+          		os.Stdout = w
+          		os.Stderr = w
+          		go func() {
+          			scanner := bufio.NewScanner(r)
+          			for scanner.Scan() {
+          				line := scanner.Text()
+          				if m := tunnelURLRe.FindString(line); m != "" && m != "https://api.trycloudflare.com" {
+          					bridgeMu.Lock()
+          					if bridgeURL == "" {
+          						bridgeURL = m
+          						bridgeStatus = "ready"
+          					}
+          					bridgeMu.Unlock()
+          				}
+          			}
+          		}()
+          	}
+
+          	go func(p int) {
+          		os.Args = []string{
+          			"cloudflared", "tunnel",
+          			"--url", fmt.Sprintf("http://127.0.0.1:%d", p),
+          			"--no-autoupdate",
+          		}
+          		cloudflaredMain()
+          		bridgeMu.Lock()
+          		if bridgeURL == "" {
+          			bridgeStatus = "failed"
+          		}
+          		bridgeMu.Unlock()
+          	}(int(port))
+          }
+
+          //export StopCloudflaredTunnel
+          func StopCloudflaredTunnel() {
+          	bridgeMu.Lock()
+          	ch := bridgeShutdown
+          	bridgeStatus = "off"
+          	bridgeURL = ""
+          	bridgeMu.Unlock()
+          	if ch != nil {
+          		bridgeOnce.Do(func() { close(ch) })
+          	}
+          }
+
+          func copyToCBuf(src string, buf *C.char, bufLen C.int) {
+          	if buf == nil || bufLen <= 0 {
+          		return
+          	}
+          	n := int(bufLen) - 1
+          	if len(src) < n {
+          		n = len(src)
+          	}
+          	if n > 0 {
+          		cs := C.CString(src)
+          		C.memcpy(unsafe.Pointer(buf), unsafe.Pointer(cs), C.size_t(n))
+          		C.free(unsafe.Pointer(cs))
+          	}
+          	*(*C.char)(unsafe.Pointer(uintptr(unsafe.Pointer(buf)) + uintptr(n))) = 0
+          }
+
+          //export GetCloudflaredStatus
+          func GetCloudflaredStatus(buf *C.char, bufLen C.int) {
+          	bridgeMu.Lock()
+          	s := bridgeStatus
+          	bridgeMu.Unlock()
+          	copyToCBuf(s, buf, bufLen)
+          }
+
+          //export GetCloudflaredURL
+          func GetCloudflaredURL(buf *C.char, bufLen C.int) {
+          	bridgeMu.Lock()
+          	u := bridgeURL
+          	bridgeMu.Unlock()
+          	copyToCBuf(u, buf, bufLen)
+          }
+          EOF
+
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          CC_BIN="$(xcrun --sdk iphoneos --find clang) -arch arm64 -isysroot $SDK_PATH -miphoneos-version-min=15.0"
+          CGO_ENABLED=1 GOOS=ios GOARCH=arm64 CC="$CC_BIN" \
+            go build -buildmode=c-archive \
+            -o "$GITHUB_WORKSPACE/ClassTestTeacher/libcloudflared.a" \
+            ./cmd/cloudflared
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Build unsigned Teacher iOS app
+        run: |
+          xcodebuild \
+            -project ClassTestTeacher.xcodeproj \
+            -scheme ClassTestTeacher \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/ClassTestTeacher.app Payload/
+          zip -r ClassTest-Teacher-iOS-unsigned.ipa Payload
+
+      - name: Upload Teacher IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClassTest-Teacher-iOS-IPA
+          path: ClassTest-Teacher-iOS-unsigned.ipa

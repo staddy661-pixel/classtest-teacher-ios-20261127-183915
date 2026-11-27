@@ -1,0 +1,36 @@
+name: ClassTestTeacher
+options:
+  bundleIdPrefix: com.classtest
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  ClassTestTeacher:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: ClassTestTeacher
+      - path: WebStatic
+        type: folder
+        buildPhase: resources
+    info:
+      path: ClassTestTeacher/Info.plist
+    dependencies:
+      - sdk: libsqlite3.tbd
+      - sdk: libz.tbd
+      - sdk: libresolv.tbd
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.classtest.teacher
+        PRODUCT_NAME: ClassTestTeacher
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: ClassTestTeacher/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_OBJC_BRIDGING_HEADER: ClassTestTeacher/ClassTestTeacher-Bridging-Header.h
+        OTHER_LDFLAGS:
+          - "$(PROJECT_DIR)/ClassTestTeacher/libcloudflared.a"
+          - "-lresolv"
